@@ -1,0 +1,39 @@
+version: 0.2
+
+env:
+  variables:
+    TF_VERSION: "0.10.7"
+
+phases:
+
+  install:
+    commands:
+      # install required binary
+      - "curl -s -qL -o /usr/bin/jq https://stedolan.github.io/jq/download/linux64/jq"
+      - "chmod +x /usr/bin/jq"
+      - "cd /usr/bin"
+      - "curl -s -qL -o terraform.zip https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
+      - "unzip -o terraform.zip"
+  pre_build:
+    commands:
+      # Workaround until TF supports creds via Task Roles when running on ECS or CodeBuild
+      # See: https://github.com/hashicorp/terraform/issues/8746
+      - export AWS_RAW_CRED=$(curl --silent http://169.254.170.2:80$AWS_CONTAINER_CREDENTIALS_RELATIVE_URI)
+      - export AWS_ACCESS_KEY_ID=$(echo $AWS_RAW_CRED | jq -r '.AccessKeyId')
+      - export AWS_SECRET_ACCESS_KEY=$(echo $AWS_RAW_CRED | jq -r '.SecretAccessKey')
+      - export AWS_SESSION_TOKEN=$(echo $AWS_RAW_CRED | jq -r '.Token')
+
+  build:
+    commands:
+      - cd "$CODEBUILD_SRC_DIR"
+      - cd "environments/$TF_ENV/"
+      - terraform init -no-color
+      - terraform $TF_ACTION -no-color
+
+  post_build:
+    commands:
+      - echo "terraform $TF_ACTION completed on `date`"
+
+artifacts:
+  files:
+    - '**/*'

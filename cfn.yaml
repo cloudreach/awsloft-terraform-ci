@@ -1,0 +1,266 @@
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Serverless deployment pipeline for Terraform projects
+Parameters:
+  S3ObjectKey:
+    Type: String
+    Default: "workspace/data.zip"
+    Description: The Git branch to be used
+
+  ArtifactBucketName:
+    Type: String
+    Default: "aws-loft-de-terraform"
+    Description: Artifact S3 BucketName
+
+  DockerBuildImage:
+    Type: String
+    Default: "aws/codebuild/docker:1.12.1"
+    Description: Docker Image used by CodeBuild
+
+  GitHubOwner:
+    Description: 'The owner of the GitHub repository.'
+    Default: "cloudreach"
+    Type: String
+  GitHubOAuthToken:
+    Description: 'The OAuthToken of the GitHub user.'
+    Type: String
+    NoEcho: true
+  GitHubRepo:
+    Description: 'The GitHub repository.'
+    Type: String
+    Default: "awsloft-terraform-ci"
+  GitHubRepoBranch:
+    Description: 'The GitHub repository branch'
+    Default: "master"
+    Type: String
+
+  SnsTopicName:
+    Type: String
+    Default: "sns-manual-approval"
+    Description: Sns Topic for Manual approval
+
+Resources:
+  ArtifactStoreBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${ArtifactBucketName}-${AWS::Region}
+      VersioningConfiguration:
+        Status: Enabled
+      AccessControl: BucketOwnerFullControl
+
+  PipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: codepipeline.amazonaws.com
+          Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+
+  InvokeTerraformBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: codebuild.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+
+  SNSManualApproval:
+    Type: "AWS::SNS::Topic"
+    Properties:
+      DisplayName: !Ref SnsTopicName
+      TopicName: !Ref SnsTopicName
+
+
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: aws-loft-pipeline
+      RoleArn: !GetAtt PipelineRole.Arn
+      ArtifactStore:
+        Location: !Ref ArtifactStoreBucket
+        Type: S3
+      Stages:
+
+        - Name: SourceCode
+          Actions:
+            - InputArtifacts: []
+              Name: Source
+              RunOrder: 1
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Version: 1
+                Provider: GitHub
+              OutputArtifacts:
+                - Name: TFWorkspace
+              Configuration:
+                Owner: !Ref GitHubOwner
+                Repo: !Ref GitHubRepo
+                Branch: !Ref GitHubRepoBranch
+                OAuthToken: !Ref GitHubOAuthToken
+
+        - Name: Dev
+          Actions:
+            - Name: terraform-apply
+              RunOrder: 1
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              InputArtifacts:
+                - Name: TFWorkspace
+              OutputArtifacts: []
+              Configuration:
+                ProjectName: !Ref InvokeDevTerraformApply
+
+        - Name: Dev-HTTP-Test
+          Actions:
+            - Name: http-test
+              RunOrder: 1
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              InputArtifacts:
+                - Name: TFWorkspace
+              OutputArtifacts: []
+              Configuration:
+                ProjectName: !Ref HttpDevTest
+
+        - Name: Prod
+          Actions:
+            - Name: terraform-plan
+              RunOrder: 1
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              InputArtifacts:
+                - Name: TFWorkspace
+              OutputArtifacts:
+                - Name: TFWorkspaceProdPlan
+              Configuration:
+                ProjectName: !Ref InvokeProdTerraformPlan
+
+            - Name: Manual-Approval
+              RunOrder: 2
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Version: '1'
+                Provider: Manual
+              Configuration:
+                NotificationArn: !Ref SNSManualApproval
+
+            - Name: terraform-apply
+              RunOrder: 3
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              InputArtifacts:
+                - Name: TFWorkspaceProdPlan
+              OutputArtifacts: []
+              Configuration:
+                ProjectName: !Ref InvokeProdTerraformApply
+
+
+  InvokeDevTerraformApply:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${AWS::StackName}-DevApply
+      ServiceRole: !Ref InvokeTerraformBuildRole
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: !Ref DockerBuildImage
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: TF_ENV
+            Value: dev
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec-dev.yml
+
+
+  HttpDevTest:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${AWS::StackName}-HttpTest
+      ServiceRole: !Ref InvokeTerraformBuildRole
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: !Ref DockerBuildImage
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: SSM_VAL
+            Value: dev.www.target
+
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: !Sub |
+          version: 0.2
+          phases:
+            build:
+              commands:
+                - cd "$CODEBUILD_SRC_DIR"
+                - bash ./test/http_test.sh
+
+
+  InvokeProdTerraformPlan:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${AWS::StackName}-ProdPlan
+      ServiceRole: !Ref InvokeTerraformBuildRole
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: !Ref DockerBuildImage
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: TF_ACTION
+            Value: plan
+          - Name: TF_ENV
+            Value: prod
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec-prod.yml
+
+
+  InvokeProdTerraformApply:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      ServiceRole: !Ref InvokeTerraformBuildRole
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: !Ref DockerBuildImage
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: TF_ACTION
+            Value: apply
+          - Name: TF_ENV
+            Value: prod
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec-prod.yml
