@@ -49,9 +49,9 @@ This pipeline allows:
 Technology
 ----------
 
-CodeDeploy
+CodeBuild
 **********
-AWS CodeDeploy is a service that automates the deployment of an application code to EC2 instances (or to servers running on-premises). CodeDeploy can be configured to deploy according to various methods (e.g. all at once or a specified percentage / number of instances at a time), and it can track application health during the deployment process and rollback to previous versions if needed. It integrates with other CI/CD products, including Jenkins and CodePipeline.
+AWS CodeBuild is a fully managed build service in the cloud. AWS CodeBuild compiles your source code, runs unit tests, and produces artifacts that are ready to deploy. AWS CodeBuild eliminates the need to provision, manage, and scale your own build servers. It provides prepackaged build environments for the most popular programming languages and build tools such as Apache Maven, Gradle, and more. You can also customize build environments in AWS CodeBuild to use your own build tools. AWS CodeBuild scales automatically to meet peak build requests
 
 
 CodePipeline
